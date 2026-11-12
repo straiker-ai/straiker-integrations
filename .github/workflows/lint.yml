@@ -1,0 +1,52 @@
+name: lint
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions: {}
+
+jobs:
+  shell:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: bash -n
+        run: git ls-files -z '*.sh' | xargs -0 -r -n1 bash -n
+      # Fails on warnings and errors. Imported scripts are kept verbatim, so style notes do not fail CI;
+      # new scripts should be clean at the default level (see CONTRIBUTING.md).
+      - name: shellcheck
+        run: |
+          command -v shellcheck >/dev/null || { sudo apt-get update -q && sudo apt-get install -y -q shellcheck; }
+          shellcheck --version
+          git ls-files -z '*.sh' | xargs -0 -r shellcheck --severity=warning
+
+  powershell:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Get-Module -ListAvailable PSScriptAnalyzer | Where-Object Version -eq '1.25.0')) {
+            Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force
+          }
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
+          $files = @(git ls-files '*.ps1')
+          if ($files.Count -eq 0) { Write-Host 'no PowerShell files'; exit 0 }
+          $results = @($files | ForEach-Object { Invoke-ScriptAnalyzer -Path $_ })
+          $results | Sort-Object ScriptName, Line |
+            Format-Table -AutoSize Severity, RuleName, ScriptName, Line, Message | Out-String -Width 200 | Write-Host
+          $errors = @($results | Where-Object Severity -eq 'Error')
+          if ($errors.Count -gt 0) { Write-Error "$($errors.Count) PSScriptAnalyzer error(s)" }
