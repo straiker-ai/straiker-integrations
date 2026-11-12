@@ -1,0 +1,60 @@
+name: release
+
+# Releases are tag-only: pushing a v* tag lints, packages platforms/<name>/ and publishes a GitHub
+# Release with every asset and SHA256SUMS attached.
+on:
+  push:
+    tags: ['v*']
+
+permissions: {}
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  lint:
+    permissions:
+      contents: read
+    uses: ./.github/workflows/lint.yml
+
+  release:
+    needs: lint
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write   # create the GitHub Release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: package
+        run: |
+          set -euo pipefail
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          export SOURCE_DATE_EPOCH
+          mkdir dist
+          for dir in platforms/*/; do
+            name="$(basename "$dir")"
+            assets=0
+            for f in "$dir"*; do
+              case "$f" in
+                *.sh|*.ps1|*.yaml|*.yml|*.json)
+                  cp "$f" "dist/${name}-$(basename "$f")"
+                  assets=1 ;;
+              esac
+            done
+            [ "$assets" = 1 ] || continue   # README-only platforms have nothing to ship
+            tar --sort=name --mtime="@${SOURCE_DATE_EPOCH}" --owner=0 --group=0 --numeric-owner \
+              -C platforms -cf - "$name" | gzip -n > "dist/${name}.tar.gz"
+          done
+          (cd dist && sha256sum -- * > SHA256SUMS)
+          cat dist/SHA256SUMS
+      - name: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" dist/* --repo "$REPO" --verify-tag --title "$TAG" \
+            --notes "Verify downloads with SHA256SUMS before running, e.g. grep ' databricks-setup.sh\$' SHA256SUMS | shasum -a 256 -c -"

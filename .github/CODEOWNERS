@@ -1,0 +1,10 @@
+# Every change needs an owner's review: customers run these scripts with admin rights in their own accounts.
+# Enable "Require review from Code Owners" on main for this to be enforced.
+
+*              @yg-ship-it @pratha-straiker @rekiarts @PhimmStraiker
+
+# Release and lint workflows publish what customers download.
+/.github/      @yg-ship-it @pratha-straiker @rekiarts @PhimmStraiker
+
+# Add per-platform owners below as platform owners join, for example:
+# /platforms/databricks/   @yg-ship-it @<databricks-owner>
