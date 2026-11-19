@@ -8,8 +8,8 @@
 # Docs: https://github.com/straiker-ai/straiker-integrations/tree/main/platforms/databricks
 set -euo pipefail
 
-readonly DISCOVER_SCOPES='["genie:read","access-management:read","unity-catalog:read"]'
-readonly ASCEND_SCOPES='["genie"]'
+readonly DISCOVER_SCOPES='["genie:read","access-management:read","unity-catalog:read","model-serving:read","apps:read","knowledge-assistants:read"]'
+readonly ASCEND_SCOPES='["genie","model-serving","apps"]'
 readonly HOST_RE='^https://[a-z0-9][a-z0-9.-]*\.(cloud\.databricks\.com|azuredatabricks\.net|gcp\.databricks\.com)$'
 
 usage() {
@@ -34,11 +34,12 @@ logged in with the Databricks CLI (databricks auth login --host <workspace URL>)
 
 What it does:
   Discover: one service principal, added to each workspace's "admins" group so it can see every
-  Genie space; its OAuth secret is pinned to genie:read, access-management:read and
-  unity-catalog:read, so it cannot run SQL, prompt Genie, read secrets or manage users.
+  Genie space, serving agent, app, Knowledge Assistant and MCP service; its OAuth secret is pinned
+  to genie:read, access-management:read, unity-catalog:read, model-serving:read, apps:read and
+  knowledge-assistants:read, so it cannot run SQL, prompt Genie, read secrets or manage users.
   Ascend (only with --ascend-spaces): a second service principal with a secret pinned to genie,
-  CAN_READ on each space, CAN_USE on each space's SQL warehouse and USE CATALOG / USE SCHEMA /
-  SELECT on each table in the space.
+  model-serving and apps, CAN_READ on each space, CAN_USE on each space's SQL warehouse and
+  USE CATALOG / USE SCHEMA / SELECT on each table in the space.
 
 Output: the values to paste into Straiker, printed once to stdout. Re-running creates a new
 secret and prints the command to delete older ones.

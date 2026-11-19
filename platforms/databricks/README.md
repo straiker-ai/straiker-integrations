@@ -11,8 +11,8 @@ and write nothing to disk.
 
 | Product | What it does with this access |
 | --- | --- |
-| Discover | Inventories Genie spaces (agents), their tables, permissions and Unity Catalog grants in each workspace. Principal: `straiker-discover`. |
-| Ascend | Sends red-team test prompts to the Genie spaces you choose, as a principal with the data access of a typical user. Principal: `straiker-ascend`, created only with `--ascend-spaces`. |
+| Discover | Inventories the AI agents in each workspace (Genie spaces, Model Serving agent endpoints, Agent Bricks apps and Knowledge Assistants) with their owners, permissions and the tables Genie reads, and Unity Catalog MCP services. Principal: `straiker-discover`. |
+| Ascend | Sends red-team test prompts to the agents you choose, as a principal with the data access of a typical user. The script sets it up for Genie spaces; for serving agents and apps, grant it the permissions below by hand. Principal: `straiker-ascend`, created only with `--ascend-spaces`. |
 | Defend | Not used by these scripts. Runtime guardrails for Databricks are the [`straiker-databricks-guardrail`](https://github.com/straiker-ai/straiker-databricks-guardrail) app. |
 
 ## What it creates in your account
@@ -22,8 +22,8 @@ and write nothing to disk.
 | Item | Where | Why |
 | --- | --- | --- |
 | Service principal `straiker-discover` (reused if one with that name exists) | Each listed workspace | The identity Straiker uses for Discover. |
-| Membership of the `admins` group | Each listed workspace | Genie shows a space's tables and permissions only to the space's editors and managers or to a workspace admin. Without this, Discover sees only the spaces shared with it. |
-| OAuth secret pinned to `genie:read`, `access-management:read`, `unity-catalog:read` | The principal | The credential Straiker holds. Databricks enforces the scopes: this secret cannot mint an `all-apis` token, so it cannot run SQL, send Genie prompts, read secrets or manage users, even though the principal is an admin. |
+| Membership of the `admins` group | Each listed workspace | Databricks shows a Genie space's tables and permissions, a serving endpoint, an app or a Knowledge Assistant only to those it is shared with, or to a workspace admin. Without this, Discover silently misses agents. |
+| OAuth secret pinned to `genie:read`, `access-management:read`, `unity-catalog:read`, `model-serving:read`, `apps:read`, `knowledge-assistants:read` | The principal | The credential Straiker holds. Databricks enforces the scopes: this secret cannot mint an `all-apis` token, so it cannot run SQL, send Genie prompts, read secrets or manage users, even though the principal is an admin. |
 
 Admin membership gives the principal visibility; the pinned secret is what limits its power. A
 token minted from any other secret of this principal would not be limited, so do not create one.
@@ -33,10 +33,13 @@ token minted from any other secret of this principal would not be limited, so do
 | Item | Where | Why |
 | --- | --- | --- |
 | Service principal `straiker-ascend` (reused if it exists) | Each workspace that hosts one of the spaces | The identity Ascend prompts Genie as. Not an admin. |
-| OAuth secret pinned to `genie` | The principal | Lets Ascend start Genie conversations and nothing else. |
+| OAuth secret pinned to `genie`, `model-serving`, `apps` | The principal | Lets Ascend prompt Genie spaces, query serving agents and call apps, and nothing else. |
 | `CAN_READ` on each Genie space | Genie space permissions | Enough to prompt the space (measured). |
 | `CAN_USE` on each space's SQL warehouse | Warehouse permissions | Genie runs its SQL on that warehouse as the caller. |
 | `USE CATALOG`, `USE SCHEMA`, `SELECT` on every table in each space | Unity Catalog | Genie answers with the caller's own data permissions and **fails every question in a space if the caller cannot read any one of its tables**. Grants on the built-in `samples` catalog may be refused; that is fine, it is readable by everyone. |
+
+To assess a serving agent or Knowledge Assistant, also give the Ascend principal `CAN_QUERY` on its
+serving endpoint; for an Agent Bricks app, `CAN_USE` on the app. The script does not grant these.
 
 Genie answers the Ascend principal with its own permissions, so give it the access a typical user
 of the agent has and no more. **Genie usage by the Ascend principal is billed to your Databricks
@@ -97,8 +100,6 @@ tickets or chat.
 These steps follow documented Databricks APIs but have not yet been run against a live workspace.
 If one fails, the script reports it and continues; do the step by hand and re-run.
 
-- Adding the Discover principal to `admins` through the SCIM API (`databricks groups patch`). The
-  verified path is the workspace UI: **Settings > Identity and access > Groups > admins > Add members**.
 - Adding an existing principal to a second workspace by application ID
   (`databricks service-principals create --application-id ...`). Only multi-workspace runs use
   this. The alternative is the account console: **Workspaces > (workspace) > Permissions**.
