@@ -7,6 +7,9 @@ narrow scopes, and prints the values to paste into the Straiker console. `teardo
 The scripts call only the Databricks CLI with your existing login. They send nothing to Straiker
 and write nothing to disk.
 
+Before the onboarding session, fill in the [request form](REQUEST_FORM.md): the products you want,
+who needs to attend, and the details to have ready.
+
 ## What this connects
 
 | Product | What it does with this access |
