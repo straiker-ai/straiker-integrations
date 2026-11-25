@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Creates an IAM role with a customer-managed policy for Straiker to
+  read log/trace exports from S3. The role is assumable only by the
+  Straiker cross-account assumer role with the provided External ID.
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: External ID shared with Straiker for secure cross-account role assumption.
+    MinLength: 1
+    NoEcho: true
+
+  StraikerAssumerRoleArn:
+    Type: String
+    Description: ARN of the Straiker cross-account assumer role allowed to assume this role.
+
+  RoleName:
+    Type: String
+    Default: straiker-log-ingest-reader
+    Description: IAM role name; managed policy name is RoleName + Policy (e.g. straiker-log-ingest-readerPolicy).
+
+  BucketArns:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated S3 bucket ARNs for ListBucket access
+      (e.g. arn:aws:s3:::my-exports-bucket).
+
+  ObjectArns:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated S3 object ARNs for GetObject access,
+      prefix-scoped (e.g. arn:aws:s3:::my-exports-bucket/exports/*).
+
+Resources:
+  StraikerLogIngestPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Join ['', [!Ref RoleName, Policy]]
+      Description: Grants Straiker read-only access to S3 log/trace exports.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Identity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: "*"
+          - Sid: S3ListBuckets
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource: !Ref BucketArns
+          - Sid: S3ReadObjects
+            Effect: Allow
+            Action:
+              - s3:GetObject
+            Resource: !Ref ObjectArns
+
+  StraikerLogIngestRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref StraikerAssumerRoleArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+          - Effect: Allow
+            Principal:
+              AWS: !Ref StraikerAssumerRoleArn
+            Action: sts:TagSession
+      ManagedPolicyArns:
+        - !Ref StraikerLogIngestPolicy
+
+Outputs:
+  RoleArn:
+    Description: ARN of the created IAM role — provide this to Straiker.
+    Value: !GetAtt StraikerLogIngestRole.Arn
+  PolicyArn:
+    Description: ARN of the managed policy attached to the role.
+    Value: !Ref StraikerLogIngestPolicy

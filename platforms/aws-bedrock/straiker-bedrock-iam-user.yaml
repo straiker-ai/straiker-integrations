@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Creates an IAM user with access keys and a customer-managed policy for
+  Straiker to discover Bedrock agents and read invocation logs from S3.
+  Use this when cross-account role assumption is not available.
+
+Parameters:
+  UserName:
+    Type: String
+    Default: straiker-bedrock
+    Description: IAM user name; managed policy name is UserName + Policy (e.g. straiker-bedrockPolicy).
+
+  BucketArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Comma-separated S3 bucket ARNs for ListBucket access
+      (e.g. arn:aws:s3:::my-bedrock-logs).
+
+  ObjectArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Comma-separated S3 object ARNs for GetObject access,
+      prefix-scoped (e.g. arn:aws:s3:::my-bedrock-logs/agent-logs/*).
+
+Conditions:
+  HasBuckets: !Not [!Equals [!Select [0, !Ref BucketArns], ""]]
+
+Resources:
+  StraikerBedrockPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Join ['', [!Ref UserName, Policy]]
+      Description: Grants Straiker read-only access to Bedrock agents and S3 invocation logs.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Identity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: "*"
+          - Sid: BedrockDiscovery
+            Effect: Allow
+            Action:
+              - bedrock:ListAgents
+              - bedrock:GetAgent
+              - bedrock:ListAgentActionGroups
+              - bedrock:GetAgentActionGroup
+              - bedrock:ListAgentAliases
+              - bedrock:ListAgentVersions
+              - bedrock:ListAgentKnowledgeBases
+              - bedrock:GetKnowledgeBase
+              - bedrock:ListTagsForResource
+              - bedrock-agentcore:ListAgentRuntimes
+              - bedrock-agentcore:GetAgentRuntime
+              - bedrock-agentcore:ListHarnesses
+              - bedrock-agentcore:GetHarness
+              - bedrock-agentcore:GetMemory
+              - bedrock-agentcore:GetCodeInterpreter
+              - bedrock-agentcore:GetBrowser
+              - bedrock-agentcore:ListGateways
+              - bedrock-agentcore:GetGateway
+              - bedrock-agentcore:ListGatewayTargets
+              - bedrock-agentcore:GetGatewayTarget
+              - bedrock-agentcore:ListTagsForResource
+              - lambda:GetFunctionConfiguration
+            Resource: "*"
+          - Sid: CloudTrailLookup
+            Effect: Allow
+            Action:
+              - cloudtrail:LookupEvents
+            Resource: "*"
+          - !If
+            - HasBuckets
+            - Sid: S3ListBuckets
+              Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource: !Ref BucketArns
+            - !Ref AWS::NoValue
+          - !If
+            - HasBuckets
+            - Sid: S3ReadObjects
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Ref ObjectArns
+            - !Ref AWS::NoValue
+
+  StraikerBedrockUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: !Ref UserName
+      ManagedPolicyArns:
+        - !Ref StraikerBedrockPolicy
+
+  StraikerBedrockAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref StraikerBedrockUser
+
+Outputs:
+  AccessKeyId:
+    Description: Access key ID — provide this to Straiker.
+    Value: !Ref StraikerBedrockAccessKey
+  SecretAccessKey:
+    Description: Secret access key — provide this to Straiker. Shown only at stack creation.
+    Value: !GetAtt StraikerBedrockAccessKey.SecretAccessKey
+  PolicyArn:
+    Description: ARN of the managed policy attached to the user.
+    Value: !Ref StraikerBedrockPolicy

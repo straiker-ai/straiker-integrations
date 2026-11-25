@@ -1,0 +1,81 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Enables S3 → EventBridge notifications on the specified buckets and
+  routes PutObject events to the Straiker ingest-api webhook via an
+  EventBridge API Destination.
+
+Parameters:
+  WebhookURL:
+    Type: String
+    Description: Straiker ingest-api webhook endpoint URL (includes embedded API key).
+    MinLength: 1
+
+  BucketArns:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated S3 bucket ARNs to monitor
+      (e.g. arn:aws:s3:::my-bedrock-logs).
+
+Resources:
+  Connection:
+    Type: AWS::Events::Connection
+    Properties:
+      Name: !Sub "straiker-bedrock-${AWS::StackName}"
+      AuthorizationType: API_KEY
+      AuthParameters:
+        ApiKeyAuthParameters:
+          ApiKeyName: x-webhook-token
+          ApiKeyValue: embedded-in-url
+
+  ApiDestination:
+    Type: AWS::Events::ApiDestination
+    Properties:
+      Name: !Sub "straiker-bedrock-${AWS::StackName}"
+      ConnectionArn: !GetAtt Connection.Arn
+      InvocationEndpoint: !Ref WebhookURL
+      HttpMethod: POST
+      InvocationRateLimitPerSecond: 50
+
+  EventBridgeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "straiker-eb-invoke-${AWS::StackName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: invoke-api-destination
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: events:InvokeApiDestination
+                Resource: !GetAtt ApiDestination.Arn
+
+  S3EventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "straiker-bedrock-s3-${AWS::StackName}"
+      State: ENABLED
+      EventPattern:
+        source:
+          - aws.s3
+        detail-type:
+          - Object Created
+        resources: !Ref BucketArns
+      Targets:
+        - Id: straiker-webhook
+          Arn: !GetAtt ApiDestination.Arn
+          RoleArn: !GetAtt EventBridgeRole.Arn
+
+Outputs:
+  RuleName:
+    Description: EventBridge rule routing S3 events to Straiker.
+    Value: !Ref S3EventRule
+  ApiDestinationArn:
+    Description: API Destination ARN.
+    Value: !GetAtt ApiDestination.Arn
