@@ -1,7 +1,12 @@
 name: release
 
 # Releases are tag-only: pushing a v* tag lints, packages platforms/<name>/ and publishes a GitHub
-# Release with every asset and SHA256SUMS attached.
+# Release with every asset and SHA256SUMS attached. Push the tag; do not create the release by hand
+# (the publish step creates it and fails if it already exists).
+#
+# Then each release's CloudFormation templates are copied to the Straiker S3 buckets named in the
+# TEMPLATE_BUCKETS repository variable, because CloudFormation only creates stacks from S3. Unset, the
+# copy is skipped.
 on:
   push:
     tags: ['v*']
@@ -58,3 +63,54 @@ jobs:
           set -euo pipefail
           gh release create "$TAG" dist/* --repo "$REPO" --verify-tag --title "$TAG" \
             --notes "Verify downloads with SHA256SUMS before running, e.g. grep ' databricks-setup.sh\$' SHA256SUMS | shasum -a 256 -c -"
+
+  # Copies the release's CloudFormation templates to cft/<tag>/ in each bucket named by the
+  # TEMPLATE_BUCKETS repository variable, a JSON list of {"name", "role_arn", "bucket", "region"}
+  # (kept out of this public repo). Each role trusts only this repo's v* tags and may only write
+  # cft/*. The files copied are the published release assets, checked against SHA256SUMS, and an
+  # object that already exists is never overwritten.
+  templates:
+    needs: release
+    if: vars.TEMPLATE_BUCKETS != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read    # download the release assets
+      id-token: write   # assume the bucket's publisher role
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJSON(vars.TEMPLATE_BUCKETS) }}
+    steps:
+      - name: download the release's templates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir templates && cd templates
+          gh release download "$TAG" --repo "$REPO" --pattern '*.yaml' --pattern SHA256SUMS
+          grep -E ' [^ ]+\.yaml$' SHA256SUMS | sha256sum -c -
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ matrix.target.role_arn }}
+          aws-region: ${{ matrix.target.region }}
+      - name: copy to s3://<bucket>/cft/<tag>/
+        working-directory: templates
+        env:
+          TAG: ${{ github.ref_name }}
+          BUCKET: ${{ matrix.target.bucket }}
+        run: |
+          set -euo pipefail
+          for f in *.yaml; do
+            key="cft/${TAG}/${f}"
+            if out="$(aws s3api put-object --bucket "$BUCKET" --key "$key" --body "$f" \
+                --content-type application/x-yaml --if-none-match '*' 2>&1)"; then
+              echo "published ${key}"
+            elif grep -q PreconditionFailed <<<"$out"; then
+              echo "already published ${key}; left as is"
+            else
+              echo "$out" >&2
+              exit 1
+            fi
+          done
