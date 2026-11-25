@@ -9,3 +9,5 @@
 # Add per-platform owners below as platform owners join, for example:
 # /platforms/databricks/   @yg-ship-it @<databricks-owner>
 /platforms/snowflake/    @yg-ship-it @pratha-straiker @rekiarts @PhimmStraiker @pgstraiker
+/platforms/aws-bedrock/   @yg-ship-it @pratha-straiker @rekiarts @PhimmStraiker @pgstraiker
+/platforms/aws-log-ingest/ @yg-ship-it @pratha-straiker @rekiarts @PhimmStraiker @pgstraiker

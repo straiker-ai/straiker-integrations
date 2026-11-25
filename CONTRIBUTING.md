@@ -39,6 +39,12 @@ Every script or template must:
 Assets imported verbatim from a previously hosted copy are marked as such in their README and are
 not edited in the import change; fixes follow as separate changes.
 
+CloudFormation templates must stay update-compatible: customers update existing stacks to newer
+releases, and CloudFormation replaces a resource whose logical ID or name changes, which gives a role
+a new ARN and breaks the integration until it is re-entered in Straiker. Never rename or remove a
+parameter, resource logical ID or default resource name. Add parameters only with a default that keeps
+the existing behavior.
+
 ## Adding a platform
 
 ```text

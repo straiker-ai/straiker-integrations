@@ -1,0 +1,77 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Creates an IAM role that lets Straiker Ascend send red-team test prompts to
+  the Amazon Bedrock AgentCore runtimes you choose, and nothing else. It is
+  separate from the read-only Discover role. The role is assumable only by the
+  Straiker cross-account assumer role with the provided External ID.
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: External ID Straiker issued for this role (shown in the Straiker console).
+    MinLength: 16
+    NoEcho: true
+
+  StraikerAssumerRoleArn:
+    Type: String
+    Description: ARN of the Straiker cross-account assumer role allowed to assume this role.
+
+  RoleName:
+    Type: String
+    Default: straiker-bedrock-ascend
+    Description: IAM role name.
+
+  RuntimeArns:
+    Type: CommaDelimitedList
+    Description: >
+      Comma-separated AgentCore runtime ARNs Ascend may invoke
+      (e.g. arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/support_agent-AbC123).
+
+Resources:
+  StraikerBedrockAscendRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      Description: Straiker Ascend invokes only the AgentCore runtimes named in its policy.
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref StraikerAssumerRoleArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+          - Effect: Allow
+            Principal:
+              AWS: !Ref StraikerAssumerRoleArn
+            Action: sts:TagSession
+      Policies:
+        - PolicyName: StraikerAscendInvoke
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: Identity
+                Effect: Allow
+                Action: sts:GetCallerIdentity
+                Resource: "*"
+              # InvokeAgentRuntime is checked on the runtime and on the endpoint it is called through (DEFAULT or a
+              # named one); either alone is denied.
+              - Sid: InvokeChosenRuntimes
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource: !Ref RuntimeArns
+              - Sid: InvokeChosenRuntimeEndpoints
+                Effect: Allow
+                Action: bedrock-agentcore:InvokeAgentRuntime
+                Resource: !Split
+                  - ","
+                  - !Sub
+                    - "${Runtimes}/runtime-endpoint/*"
+                    - Runtimes: !Join ["/runtime-endpoint/*,", !Ref RuntimeArns]
+
+Outputs:
+  RoleArn:
+    Description: ARN of the Ascend role. Provide this to Straiker.
+    Value: !GetAtt StraikerBedrockAscendRole.Arn

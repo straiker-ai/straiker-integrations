@@ -1,0 +1,131 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Creates an IAM role with a customer-managed policy for Straiker to
+  discover Bedrock agents and read invocation logs from S3. The role is
+  assumable only by the Straiker cross-account assumer role with the
+  provided External ID.
+
+Parameters:
+  ExternalId:
+    Type: String
+    Description: External ID shared with Straiker for secure cross-account role assumption.
+    MinLength: 1
+    NoEcho: true
+
+  StraikerAssumerRoleArn:
+    Type: String
+    Description: ARN of the Straiker cross-account assumer role allowed to assume this role.
+
+  RoleName:
+    Type: String
+    Default: straiker-bedrock-scanner
+    Description: IAM role name; managed policy name is RoleName + Policy (e.g. straiker-bedrock-scannerPolicy).
+
+  BucketArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Comma-separated S3 bucket ARNs for ListBucket access
+      (e.g. arn:aws:s3:::my-bedrock-logs).
+
+  ObjectArns:
+    Type: CommaDelimitedList
+    Default: ""
+    Description: >
+      Comma-separated S3 object ARNs for GetObject access,
+      prefix-scoped (e.g. arn:aws:s3:::my-bedrock-logs/agent-logs/*).
+
+Conditions:
+  HasBuckets: !Not [!Equals [!Select [0, !Ref BucketArns], ""]]
+
+Resources:
+  StraikerBedrockPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Join ['', [!Ref RoleName, Policy]]
+      Description: Grants Straiker read-only access to Bedrock agents and S3 invocation logs.
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Identity
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: "*"
+          - Sid: BedrockDiscovery
+            Effect: Allow
+            Action:
+              - bedrock:ListAgents
+              - bedrock:GetAgent
+              - bedrock:ListAgentActionGroups
+              - bedrock:GetAgentActionGroup
+              - bedrock:ListAgentAliases
+              - bedrock:ListAgentVersions
+              - bedrock:ListAgentKnowledgeBases
+              - bedrock:GetKnowledgeBase
+              - bedrock:ListTagsForResource
+              - bedrock-agentcore:ListAgentRuntimes
+              - bedrock-agentcore:GetAgentRuntime
+              - bedrock-agentcore:ListHarnesses
+              - bedrock-agentcore:GetHarness
+              - bedrock-agentcore:GetMemory
+              - bedrock-agentcore:GetCodeInterpreter
+              - bedrock-agentcore:GetBrowser
+              - bedrock-agentcore:ListGateways
+              - bedrock-agentcore:GetGateway
+              - bedrock-agentcore:ListGatewayTargets
+              - bedrock-agentcore:GetGatewayTarget
+              - bedrock-agentcore:ListTagsForResource
+              - lambda:GetFunctionConfiguration
+            Resource: "*"
+          - Sid: CloudTrailLookup
+            Effect: Allow
+            Action:
+              - cloudtrail:LookupEvents
+            Resource: "*"
+          - !If
+            - HasBuckets
+            - Sid: S3ListBuckets
+              Effect: Allow
+              Action:
+                - s3:ListBucket
+                - s3:GetBucketLocation
+              Resource: !Ref BucketArns
+            - !Ref AWS::NoValue
+          - !If
+            - HasBuckets
+            - Sid: S3ReadObjects
+              Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Ref ObjectArns
+            - !Ref AWS::NoValue
+
+  StraikerBedrockRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Ref RoleName
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: !Ref StraikerAssumerRoleArn
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                sts:ExternalId: !Ref ExternalId
+          - Effect: Allow
+            Principal:
+              AWS: !Ref StraikerAssumerRoleArn
+            Action: sts:TagSession
+      ManagedPolicyArns:
+        - !Ref StraikerBedrockPolicy
+
+Outputs:
+  RoleArn:
+    Description: ARN of the created IAM role — provide this to Straiker.
+    Value: !GetAtt StraikerBedrockRole.Arn
+  PolicyArn:
+    Description: ARN of the managed policy attached to the role.
+    Value: !Ref StraikerBedrockPolicy
