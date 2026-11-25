@@ -33,6 +33,8 @@
 #              [--gcp-project-number=...] [--wif-pool-id=...] [--wif-provider-id=...]
 #              [--agent-platform-log-root=...] [--gemini-log-root=...]
 #              [--wif-cred-config-out=PATH] [--force-provider-update]
+#              [--straiker-binding=stkb_... --straiker-federation-role-arn=...]
+#              [--remove-legacy-trust]
 #              [--dry-run] [--allow-sa-key] [--non-interactive]
 
 set -euo pipefail
@@ -47,8 +49,14 @@ STRAIKER_AWS_ACCOUNT_ID=""
 GCP_PROJECT_NUMBER=""
 WIF_POOL_ID=""
 WIF_PROVIDER_ID="straiker-aws"
+WIF_PROVIDER_ID_SET=0
 WIF_CRED_CONFIG_OUT=""
 FORCE_PROVIDER_UPDATE=0
+STRAIKER_BINDING=""
+STRAIKER_FEDERATION_ROLE_ARN=""
+STRAIKER_BOUND_ARN=""         # bound mode: the one assumed-role session ARN trusted
+REMOVE_LEGACY_TRUST=0
+LEGACY_TRUST_KEPT=0
 DRY_RUN=0
 ALLOW_SA_KEY=0
 KEY_FILE=""
@@ -107,10 +115,19 @@ Usage:
 
   WIF (optional; same semantics as straiker-onboarding-prerequisites.md):
     --enable-wif                     WIF only: pool + AWS provider + SA bind + cred config (no JSON key)
-    --straiker-aws-account-id=ID     12-digit Straiker AWS account (required with --enable-wif)
+    --straiker-aws-account-id=ID     12-digit Straiker AWS account (required with --enable-wif
+                                     unless --straiker-federation-role-arn is given)
+    --straiker-binding=stkb_...      bound mode: trust only Straiker sessions carrying this
+                                     binding (implies --enable-wif; needs the next flag)
+    --straiker-federation-role-arn=ARN
+                                     bound mode: the Straiker AWS role that presents the binding.
+                                     The Straiker console's setup command shows both values.
+    --remove-legacy-trust            bound mode: remove the service account's account-wide
+                                     grant to the Straiker AWS account (only warned by default)
     --gcp-project-number=N           optional; resolved via gcloud if omitted
     --wif-pool-id=ID                 default: \${SA_NAME}-pool
-    --wif-provider-id=ID             default: straiker-aws
+    --wif-provider-id=ID             default: straiker-aws (bound mode: straiker-<first 12
+                                     hex chars of the binding>)
     --wif-cred-config-out=PATH       default: a private mktemp dir (0700)
     --force-provider-update          rewrite an EXISTING provider's attribute mapping.
                                      Off by default: the default provider name is shared
@@ -144,7 +161,10 @@ for arg in "$@"; do
     --straiker-aws-account-id=*)    STRAIKER_AWS_ACCOUNT_ID="${arg#*=}" ;;
     --gcp-project-number=*)         GCP_PROJECT_NUMBER="${arg#*=}" ;;
     --wif-pool-id=*)                WIF_POOL_ID="${arg#*=}" ;;
-    --wif-provider-id=*)            WIF_PROVIDER_ID="${arg#*=}" ;;
+    --wif-provider-id=*)            WIF_PROVIDER_ID="${arg#*=}"; WIF_PROVIDER_ID_SET=1 ;;
+    --straiker-binding=*)           STRAIKER_BINDING="${arg#*=}" ;;
+    --straiker-federation-role-arn=*) STRAIKER_FEDERATION_ROLE_ARN="${arg#*=}" ;;
+    --remove-legacy-trust)          REMOVE_LEGACY_TRUST=1 ;;
     --wif-cred-config-out=*)        WIF_CRED_CONFIG_OUT="${arg#*=}" ;;
     --agent-platform-log-root=*)    AGENT_PLATFORM_PREFIX="${arg#*=}" ;;
     --gemini-log-root=*)            GEMINI_PREFIX="${arg#*=}" ;;
@@ -171,6 +191,38 @@ interactive() {
 
 die() { echo "Error: $*" >&2; exit 2; }
 
+# Bound mode: trust one Straiker session, not the whole Straiker AWS account. Straiker
+# assumes its federation role with the binding as the STS session name, so the caller
+# ARN is exactly arn:<partition>:sts::<account>:assumed-role/<role>/<binding>.
+# The condition and principal grant were verified live; this path only by --dry-run.
+if [[ -n "${STRAIKER_BINDING}${STRAIKER_FEDERATION_ROLE_ARN}" ]]; then
+  [[ -n "${STRAIKER_BINDING}" && -n "${STRAIKER_FEDERATION_ROLE_ARN}" ]] || \
+    die "--straiker-binding and --straiker-federation-role-arn must be given together (the Straiker console shows both)."
+  [[ "${STRAIKER_BINDING}" =~ ^stkb_[0-9a-f]{32}$ ]] || \
+    die "invalid --straiker-binding '${STRAIKER_BINDING}' (expected stkb_ followed by 32 lowercase hex characters)."
+  _role_arn_re='^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$'
+  [[ "${STRAIKER_FEDERATION_ROLE_ARN}" =~ ${_role_arn_re} ]] || \
+    die "invalid --straiker-federation-role-arn '${STRAIKER_FEDERATION_ROLE_ARN}' (expected arn:aws:iam::<12 digits>:role/<name>)."
+  _fed_partition="${STRAIKER_FEDERATION_ROLE_ARN#arn:}"; _fed_partition="${_fed_partition%%:*}"
+  _fed_account="${STRAIKER_FEDERATION_ROLE_ARN#*:iam::}"; _fed_account="${_fed_account%%:*}"
+  # Assumed-role ARNs omit the role path, so keep only the last segment.
+  _fed_role="${STRAIKER_FEDERATION_ROLE_ARN#*:role/}"; _fed_role="${_fed_role##*/}"
+  [[ -n "${_fed_role}" ]] || die "--straiker-federation-role-arn has no role name after its path."
+  if [[ -n "${STRAIKER_AWS_ACCOUNT_ID}" && "${STRAIKER_AWS_ACCOUNT_ID}" != "${_fed_account}" ]]; then
+    die "--straiker-aws-account-id (${STRAIKER_AWS_ACCOUNT_ID}) differs from the federation role's account (${_fed_account})."
+  fi
+  STRAIKER_AWS_ACCOUNT_ID="${_fed_account}"
+  STRAIKER_BOUND_ARN="arn:${_fed_partition}:sts::${_fed_account}:assumed-role/${_fed_role}/${STRAIKER_BINDING}"
+  # The ARN is the provider's google.subject, which GCP caps at 127 bytes (ASCII here).
+  [[ "${#STRAIKER_BOUND_ARN}" -le 127 ]] || \
+    die "assumed-role ARN is ${#STRAIKER_BOUND_ARN} bytes; google.subject allows 127 (role name too long)."
+  # A per-binding provider leaves the shared straiker-aws provider untouched.
+  [[ "${WIF_PROVIDER_ID_SET}" == 1 ]] || WIF_PROVIDER_ID="straiker-${STRAIKER_BINDING:5:12}"
+  ENABLE_WIF=1; WIF_FROM_CLI=1
+elif [[ "${REMOVE_LEGACY_TRUST}" == 1 ]]; then
+  die "--remove-legacy-trust needs --straiker-binding and --straiker-federation-role-arn."
+fi
+
 # run wraps every mutating call so --dry-run can print it instead of executing. A
 # customer's platform team needs to see the change set before it touches their
 # project; there is no preflight or rollback in a POC script, so "show me first" is
@@ -193,6 +245,17 @@ run_quiet() {
     return 0
   fi
   "$@" >/dev/null
+}
+
+# A just-created service account can take a minute to accept IAM changes, so a failed call is retried before it fails.
+run_quiet_retry() {
+  local attempt
+  for attempt in 1 2 3 4 5 6; do
+    run_quiet "$@" && return 0
+    [[ "${attempt}" == 6 ]] && return 1
+    echo "  retrying in 10s (the service account may still be propagating)..."
+    sleep 10
+  done
 }
 
 # Credential artefacts go in a private, unpredictable directory. A fixed path under
@@ -413,6 +476,7 @@ if [[ -z "${SKIP_GEMINI}" ]]; then
 fi
 if [[ "${ENABLE_WIF}" == 1 ]]; then
   echo "  Credentials:   WIF only (${WIF_POOL_ID} / ${WIF_PROVIDER_ID})"
+  [[ -n "${STRAIKER_BOUND_ARN}" ]] && echo "  Bound to:      ${STRAIKER_BOUND_ARN}"
 else
   echo "  Credentials:   service account JSON key"
 fi
@@ -697,10 +761,17 @@ if [[ "${ENABLE_WIF}" == 1 ]]; then
       --display-name="Straiker Scanner" \
       --project="${HOME_PROJECT}"
   fi
-  # google.subject must be ≤127 bytes. assertion.arn often exceeds that (EKS Pod Identity,
-  # long IAM role paths). Map a short subject; keep full ARN on attribute.aws_arn for auditing.
-  _WIF_ATTR_MAP='google.subject=assertion.account,attribute.aws_account=assertion.account,attribute.aws_arn=assertion.arn'
-  _WIF_ATTR_COND="assertion.arn.contains(':assumed-role/')"
+  if [[ -n "${STRAIKER_BOUND_ARN}" ]]; then
+    # Bound mode: the subject is the exact session ARN (length checked at startup) and
+    # the condition admits only that session.
+    _WIF_ATTR_MAP='google.subject=assertion.arn,attribute.aws_account=assertion.account,attribute.aws_arn=assertion.arn'
+    _WIF_ATTR_COND="assertion.arn == '${STRAIKER_BOUND_ARN}'"
+  else
+    # google.subject must be ≤127 bytes. assertion.arn often exceeds that (EKS Pod Identity,
+    # long IAM role paths). Map a short subject; keep full ARN on attribute.aws_arn for auditing.
+    _WIF_ATTR_MAP='google.subject=assertion.account,attribute.aws_account=assertion.account,attribute.aws_arn=assertion.arn'
+    _WIF_ATTR_COND="assertion.arn.contains(':assumed-role/')"
+  fi
   WIF_PROVIDER_EXISTED=0
   if gcloud iam workload-identity-pools providers describe "${WIF_PROVIDER_ID}" \
     --location=global \
@@ -773,10 +844,17 @@ if [[ "${ENABLE_WIF}" == 1 ]]; then
       die "existing WIF provider left unchanged"
     fi
   fi
+  _WIF_POOL_PATH="iam.googleapis.com/projects/${GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL_ID}"
+  _LEGACY_MEMBER="principalSet://${_WIF_POOL_PATH}/attribute.aws_account/${STRAIKER_AWS_ACCOUNT_ID}"
+  if [[ -n "${STRAIKER_BOUND_ARN}" ]]; then
+    _WIF_MEMBER="principal://${_WIF_POOL_PATH}/subject/${STRAIKER_BOUND_ARN}"
+  else
+    _WIF_MEMBER="${_LEGACY_MEMBER}"
+  fi
   echo "  binding workloadIdentityUser on ${SA_EMAIL}"
-  if ! run_quiet gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
+  if ! run_quiet_retry gcloud iam service-accounts add-iam-policy-binding "${SA_EMAIL}" \
     --role="roles/iam.workloadIdentityUser" \
-    --member="principalSet://iam.googleapis.com/projects/${GCP_PROJECT_NUMBER}/locations/global/workloadIdentityPools/${WIF_POOL_ID}/attribute.aws_account/${STRAIKER_AWS_ACCOUNT_ID}" \
+    --member="${_WIF_MEMBER}" \
     --project="${HOME_PROJECT}" \
     --quiet; then
     cat >&2 <<'ERR'
@@ -794,6 +872,40 @@ project-level roles/resourcemanager.projects.setIamPolicy. Typical fixes:
 See also: straiker-onboarding-prerequisites.md (What You Need / IAM permissions).
 ERR
     exit 1
+  fi
+  if [[ -n "${STRAIKER_BOUND_ARN}" ]]; then
+    # The account-wide grant is never removed silently: another Straiker integration on
+    # this shared service account may still authenticate through it.
+    _has_legacy=0
+    while IFS='|' read -r _role _member; do
+      if [[ "${_role}" == "roles/iam.workloadIdentityUser" && "${_member}" == "${_LEGACY_MEMBER}" ]]; then
+        _has_legacy=1
+      fi
+    done < <(gcloud iam service-accounts get-iam-policy "${SA_EMAIL}" --project="${HOME_PROJECT}" \
+      --flatten='bindings[].members' \
+      --format='value[separator="|"](bindings.role,bindings.members)' 2>/dev/null || true)
+    if [[ "${_has_legacy}" -eq 1 && "${REMOVE_LEGACY_TRUST}" == 1 ]]; then
+      echo "  removing the account-wide grant (--remove-legacy-trust): ${_LEGACY_MEMBER}"
+      run_quiet gcloud iam service-accounts remove-iam-policy-binding "${SA_EMAIL}" \
+        --role="roles/iam.workloadIdentityUser" \
+        --member="${_LEGACY_MEMBER}" \
+        --project="${HOME_PROJECT}" \
+        --quiet
+    elif [[ "${_has_legacy}" -eq 1 ]]; then
+      LEGACY_TRUST_KEPT=1
+      echo ""
+      echo "  WARNING: ${SA_EMAIL} still grants roles/iam.workloadIdentityUser to"
+      echo "    ${_LEGACY_MEMBER}"
+      echo "  which lets ANY role in Straiker's AWS account impersonate it. Once this bound"
+      echo "  integration works, and no other Straiker GCP integration on this service account"
+      echo "  still uses the account-wide trust, remove it (or re-run with --remove-legacy-trust):"
+      printf '   '; printf ' %q' gcloud iam service-accounts remove-iam-policy-binding "${SA_EMAIL}" \
+        --role="roles/iam.workloadIdentityUser" --member="${_LEGACY_MEMBER}" \
+        --project="${HOME_PROJECT}"; printf '\n'
+      echo ""
+    elif [[ "${REMOVE_LEGACY_TRUST}" == 1 ]]; then
+      echo "  no account-wide grant on ${SA_EMAIL}; nothing to remove"
+    fi
   fi
   echo "  writing WIF credential config to ${WIF_CRED_CONFIG_OUT}"
   run gcloud iam workload-identity-pools create-cred-config \
@@ -898,6 +1010,15 @@ echo "    Keep it out of tickets, chat and shared logs; delete it once onboarded
 echo "      rm -f ${CRED_PATH}"
 echo "======================================================================="
 echo ""
+if [[ -n "${STRAIKER_BOUND_ARN}" ]]; then
+  echo "Straiker binding: ${STRAIKER_BINDING}"
+  echo "  It ties this project to your Straiker account: the bound grant admits only the"
+  echo "  Straiker session that carries this binding."
+  if [[ "${LEGACY_TRUST_KEPT}" -eq 1 ]]; then
+    echo "  The account-wide grant warned about in the WIF step still applies until you remove it."
+  fi
+  echo ""
+fi
 if [[ -z "${SKIP_AGENT_PLATFORM}" ]]; then
   echo "Reminder (Agent Platform): set GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=true and"
   echo "OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true on your ADK agents — see prerequisites."
