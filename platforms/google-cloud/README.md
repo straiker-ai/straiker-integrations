@@ -31,6 +31,7 @@ Both scripts work in a single project and are idempotent (existing resources are
 | --- | --- | --- |
 | Service account `straiker-scanner@<project>.iam.gserviceaccount.com` (`--sa-name`) | The project | The identity Straiker uses. |
 | Credential, one of: **Workload Identity Federation** (default, keyless): pool `<sa-name>-pool`, AWS provider `straiker-aws` trusting the Straiker AWS account ID you are given (attribute condition `assertion.arn.contains(':assumed-role/')`), and `roles/iam.workloadIdentityUser` on the service account for that account; **or** a service-account JSON key, only with `--allow-sa-key` | The project | What Straiker authenticates with. An existing provider whose mapping differs is never rewritten unless you pass `--force-provider-update`. |
+| **Bound mode** (with `--straiker-binding` and `--straiker-federation-role-arn`, which imply `--enable-wif`): instead of the `straiker-aws` provider and account-wide grant, a per-integration AWS provider `straiker-<first 12 hex chars of the binding>` (`--wif-provider-id` overrides) with mapping `google.subject=assertion.arn` and attribute condition `assertion.arn == 'arn:aws:sts::<12 digits>:assumed-role/<federation role name>/<binding>'`, and `roles/iam.workloadIdentityUser` on the service account for exactly that subject (`principal://.../subject/<that ARN>`) | The project | Only the Straiker session that carries your binding can impersonate the service account, rather than any role in Straiker's AWS account. If the service account still has the account-wide grant (`principalSet://.../attribute.aws_account/<12 digits>`) from an earlier run, the script leaves it in place, warns, and prints the `remove-iam-policy-binding` command; `--remove-legacy-trust` removes it. Remove it only once no other integration on the shared service account still relies on it. The provider condition and principal grant were verified live; the scripts' bound mode has been checked with `--dry-run` only. |
 | A credential file (WIF config or JSON key) | A new private `mktemp` directory (mode 0700, file 0600) on your machine | Uploaded in the Straiker console. The scripts print its path, not its contents; delete it after onboarding. |
 
 **`setup.sh`** (Gemini Enterprise & Agent Runtime)
@@ -59,7 +60,9 @@ Both scripts work in a single project and are idempotent (existing resources are
   Owner). WIF also needs `iam.serviceAccounts.setIamPolicy` on the service account (for example
   `roles/iam.serviceAccountAdmin`). Enabling Gemini observability needs
   `discoveryengine.engines.update` (Gemini Enterprise Admin).
-- For WIF: the 12-digit Straiker AWS account ID, from your Straiker contact.
+- For WIF: the 12-digit Straiker AWS account ID, from your Straiker contact. For bound mode
+  instead: the binding (`stkb_<32 hex>`) and the federation role ARN, both shown in the Straiker
+  console's setup command.
 - For Agent Runtime telemetry: set `GOOGLE_CLOUD_AGENT_ENGINE_ENABLE_TELEMETRY=true` and
   `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` on your ADK agents.
 
@@ -82,6 +85,14 @@ chmod +x google-cloud-setup.sh
   --enable-wif --straiker-aws-account-id=<12 digits>
 ```
 
+Bound mode (the Straiker console's setup command fills in both values):
+
+```bash
+./google-cloud-setup.sh --project-id=my-project --create-sink \
+  --straiker-binding=stkb_<32 hex> \
+  --straiker-federation-role-arn=arn:aws:iam::<12 digits>:role/<role name>
+```
+
 The model-logs script is downloaded and verified the same way (`google-cloud-setup-model-logs.sh`):
 
 ```bash
@@ -95,6 +106,8 @@ Main flags (`--help` lists all):
 | --- | --- | --- |
 | `--project-id=ID` | both | Project to onboard (required). |
 | `--enable-wif`, `--straiker-aws-account-id=ID` | both | Keyless credential (recommended). |
+| `--straiker-binding=stkb_...`, `--straiker-federation-role-arn=ARN` | both | Bound mode: trust only your binding's Straiker session (implies `--enable-wif`; give both). |
+| `--remove-legacy-trust` | both | Bound mode: remove the service account's account-wide grant to the Straiker AWS account. |
 | `--allow-sa-key` | both | Permit a long-lived JSON key instead of WIF. |
 | `--sa-name=NAME`, `--wif-pool-id`, `--wif-provider-id`, `--wif-cred-config-out=PATH`, `--force-provider-update` | both | Names and output path; see above. |
 | `--create-sink`, `--bucket-name`, `--bucket-location`, `--sink-name`, `--gemini-sink-name` | `setup.sh` | Create the bucket and sinks. |
